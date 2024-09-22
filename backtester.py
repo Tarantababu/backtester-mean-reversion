@@ -1,3 +1,12 @@
+import sys
+import os
+
+# Workaround for distutils
+if sys.version_info >= (3, 12):
+    import importlib.metadata as importlib_metadata
+else:
+    import importlib_metadata
+
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -10,6 +19,7 @@ import random
 from deap import base, creator, tools, algorithms
 from datetime import datetime, timedelta
 import io
+import traceback
 
 class PriceBasedCandleStrategy:
     def __init__(self, data, initial_capital=1000, ema_period=20, threshold=0.02, 
@@ -285,33 +295,38 @@ class PriceBasedCandleStrategy:
         return pd.DataFrame(history)
 
 def run_backtest_for_ticker(ticker, start_date, end_date, initial_capital, params):
-    data = yf.download(ticker, start=start_date, end=end_date)
+    try:
+        data = yf.download(ticker, start=start_date, end=end_date)
 
-    if data.empty:
-        st.write(f"Error: No data available for {ticker} between {start_date} and {end_date}.")
+        if data.empty:
+            st.error(f"Error: No data available for {ticker} between {start_date} and {end_date}.")
+            return None
+
+        if 'Close' not in data.columns:
+            st.error(f"Error: 'Close' price data not available for {ticker}.")
+            return None
+
+        strategy = PriceBasedCandleStrategy(data, initial_capital=initial_capital, **params)
+        strategy.ticker = ticker
+        strategy.start_date = start_date
+        strategy.end_date = end_date
+        strategy.backtest()
+        strategy.map_trades_to_original_data()
+
+        performance_metrics = strategy.calculate_performance_metrics()
+        backtest_history = strategy.generate_backtest_history()
+
+        return {
+            'ticker': ticker,
+            'strategy': strategy,
+            'performance_metrics': performance_metrics,
+            'params': params,
+            'backtest_history': backtest_history
+        }
+    except Exception as e:
+        st.error(f"An error occurred while running backtest for {ticker}: {str(e)}")
+        st.error(traceback.format_exc())
         return None
-
-    if 'Close' not in data.columns:
-        st.write(f"Error: 'Close' price data not available for {ticker}.")
-        return None
-
-    strategy = PriceBasedCandleStrategy(data, initial_capital=initial_capital, **params)
-    strategy.ticker = ticker
-    strategy.start_date = start_date
-    strategy.end_date = end_date
-    strategy.backtest()
-    strategy.map_trades_to_original_data()
-
-    performance_metrics = strategy.calculate_performance_metrics()
-    backtest_history = strategy.generate_backtest_history()
-
-    return {
-        'ticker': ticker,
-        'strategy': strategy,
-        'performance_metrics': performance_metrics,
-        'params': params,
-        'backtest_history': backtest_history
-    }
 
 def evaluate_individual(individual, ticker, start_date, end_date, initial_capital):
     params = {
@@ -385,7 +400,8 @@ def optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, pop
                 return best_result
 
     except Exception as e:
-        st.write(f"An error occurred while optimizing {ticker}: {str(e)}")
+        st.error(f"An error occurred while optimizing {ticker}: {str(e)}")
+        st.error(traceback.format_exc())
     
     return None
 
@@ -423,7 +439,7 @@ if st.sidebar.button('Run Optimization'):
         # Check data availability
         data = yf.download(ticker, start=start_date, end=end_date)
         if data.empty:
-            st.write(f"No data available for {ticker} between {start_date} and {end_date}. Skipping...")
+            st.warning(f"No data available for {ticker} between {start_date} and {end_date}. Skipping...")
             continue
         
         best_result = optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, population_size, generations)
@@ -448,7 +464,7 @@ if st.sidebar.button('Run Optimization'):
             fig = best_result['strategy'].plot_trades_and_equity()
             st.pyplot(fig)
         else:
-            st.write(f"No valid strategy found for {ticker}")
+            st.warning(f"No valid strategy found for {ticker}")
 
     if optimized_results:
         st.write("\nBacktest Summary:")
@@ -480,4 +496,7 @@ if st.sidebar.button('Run Optimization'):
         plt.tight_layout()
         st.pyplot(fig)
     else:
-        st.write("No valid strategies found for any tickers.")
+        st.warning("No valid strategies found for any tickers.")
+
+if __name__ == "__main__":
+    st.set_option('deprecation.showPyplotGlobalUse', False)
