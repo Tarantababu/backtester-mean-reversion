@@ -20,6 +20,7 @@ from deap import base, creator, tools, algorithms
 from datetime import datetime, timedelta
 import io
 import traceback
+from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 class PriceBasedCandleStrategy:
     def __init__(self, data, initial_capital=1000, ema_period=20, threshold=0.02, 
@@ -67,9 +68,10 @@ class PriceBasedCandleStrategy:
     def calculate_deviation(self, price, ema):
         return (price - ema) / ema
 
-    def backtest(self):
+    def backtest(self, progress_bar=None):
         self.equity_curve = [self.initial_capital] * len(self.price_based_data)
-        for i in range(1, len(self.price_based_data)):
+        total_steps = len(self.price_based_data)
+        for i in range(1, total_steps):
             if i >= self.ema_period:
                 price = self.price_based_data['Close'].iloc[i]
                 ema = self.price_based_data['EMA'].iloc[i]
@@ -84,6 +86,9 @@ class PriceBasedCandleStrategy:
                     self.check_exit_condition(i)
 
             self.update_equity(i)
+            
+            if progress_bar is not None:
+                progress_bar.progress((i + 1) / total_steps)
 
     def enter_trade(self, position_type, price, ema, index):
         position_size = self.cash * 0.2  # Use 20% of available cash for each trade
@@ -310,7 +315,11 @@ def run_backtest_for_ticker(ticker, start_date, end_date, initial_capital, param
         strategy.ticker = ticker
         strategy.start_date = start_date
         strategy.end_date = end_date
-        strategy.backtest()
+        
+        progress_bar = st.progress(0)
+        strategy.backtest(progress_bar)
+        progress_bar.empty()
+
         strategy.map_trades_to_original_data()
 
         performance_metrics = strategy.calculate_performance_metrics()
@@ -382,8 +391,20 @@ def optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, pop
         stats.register("min", np.min)
         stats.register("max", np.max)
 
+        # Create a progress bar for generations
+        progress_bar = st.progress(0)
+        progress_text = st.empty()
+
+        def show_progress(gen, progress_bar=progress_bar, progress_text=progress_text):
+            progress_bar.progress((gen + 1) / generations)
+            progress_text.text(f"Generation {gen + 1}/{generations}")
+
         pop, log = algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.2, ngen=generations, 
-                                       stats=stats, halloffame=hof, verbose=True)
+                                       stats=stats, halloffame=hof, verbose=False,
+                                       callback=show_progress)
+
+        progress_bar.empty()
+        progress_text.empty()
 
         if len(hof) > 0:
             best_individual = hof[0]
