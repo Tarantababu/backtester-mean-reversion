@@ -217,68 +217,73 @@ class PriceBasedCandleStrategy:
         }
 
     def plot_trades_and_equity(self):
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 12), sharex=True)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 12), sharex=True)
+    
+    # Plot price-based candles and EMA
+    ax1.plot(self.price_based_data.index, self.price_based_data['Close'], label='Close Price', color='black', alpha=0.7)
+    ax1.plot(self.price_based_data.index, self.price_based_data['EMA'], label=f'EMA({self.ema_period})', linestyle='--', color='blue')
+
+    # Plot trades
+    for trade in self.trades:
+        entry_date = self.price_based_data.index[trade['entry_index']]
+        entry_price = trade['entry_price']
+        exit_date = self.price_based_data.index[trade['exit_index']]
+        exit_price = trade['exit_price']
         
-        # Plot price-based candles and EMA
-        ax1.plot(self.price_based_data.index, self.price_based_data['Close'], label='Close Price', color='black', alpha=0.7)
-        ax1.plot(self.price_based_data.index, self.price_based_data['EMA'], label=f'EMA({self.ema_period})', linestyle='--', color='blue')
-
-        # Plot trades
-        for trade in self.trades:
-            entry_date = self.price_based_data.index[trade['entry_index']]
-            entry_price = trade['entry_price']
-            exit_date = self.price_based_data.index[trade['exit_index']]
-            exit_price = trade['exit_price']
-            
-            if trade['type'] == 'long':
-                ax1.plot(entry_date, entry_price, '^', markersize=10, color='g', label='Buy' if 'Buy' not in ax1.get_legend_handles_labels()[1] else "")
-                ax1.plot(exit_date, exit_price, 'o', markersize=10, color='purple', label='Close Long' if 'Close Long' not in ax1.get_legend_handles_labels()[1] else "")
-            elif trade['type'] == 'short':
-                ax1.plot(entry_date, entry_price, 'v', markersize=10, color='r', label='Sell' if 'Sell' not in ax1.get_legend_handles_labels()[1] else "")
-                ax1.plot(exit_date, exit_price, 'o', markersize=10, color='orange', label='Close Short' if 'Close Short' not in ax1.get_legend_handles_labels()[1] else "")
-            
-            # Draw lines connecting entry and exit points
-            ax1.plot([entry_date, exit_date], [entry_price, exit_price], color='gray', linestyle='--', alpha=0.5)
-
-        # Highlight price-based candles
-        for i in range(1, len(self.price_based_data)):
-            prev_close = self.price_based_data['Close'].iloc[i-1]
-            current_close = self.price_based_data['Close'].iloc[i]
-            color = 'g' if current_close > prev_close else 'r'
-            ax1.plot([self.price_based_data.index[i-1], self.price_based_data.index[i]], 
-                    [prev_close, current_close], color=color, linewidth=2, alpha=0.7)
-
-        ax1.set_title(f'{self.ticker} - Price-Based Candles, EMA, and Trades')
-        ax1.set_ylabel('Price')
-        ax1.legend()
-
-        # Plot equity curve
-        # Ensure equity_curve has the same length as price_based_data
-        equity_curve = self.equity_curve + [self.equity_curve[-1]] * (len(self.price_based_data) - len(self.equity_curve))
-        ax2.plot(self.price_based_data.index, equity_curve, label='Equity Curve', color='green')
-        ax2.axhline(self.initial_capital, linestyle='--', color='red', alpha=0.6, label='Initial Capital')
+        if trade['type'] == 'long':
+            ax1.plot(entry_date, entry_price, '^', markersize=10, color='g', label='Buy' if 'Buy' not in ax1.get_legend_handles_labels()[1] else "")
+            ax1.plot(exit_date, exit_price, 'o', markersize=10, color='purple', label='Close Long' if 'Close Long' not in ax1.get_legend_handles_labels()[1] else "")
+        elif trade['type'] == 'short':
+            ax1.plot(entry_date, entry_price, 'v', markersize=10, color='r', label='Sell' if 'Sell' not in ax1.get_legend_handles_labels()[1] else "")
+            ax1.plot(exit_date, exit_price, 'o', markersize=10, color='orange', label='Close Short' if 'Close Short' not in ax1.get_legend_handles_labels()[1] else "")
         
-        # Add markers for trade entries and exits on equity curve
-        for trade in self.trades:
-            entry_date = self.price_based_data.index[trade['entry_index']]
-            exit_date = self.price_based_data.index[trade['exit_index']]
-            entry_equity = equity_curve[trade['entry_index']]
-            exit_equity = equity_curve[trade['exit_index']]
-            
-            if trade['type'] == 'long':
-                ax2.plot(entry_date, entry_equity, '^', markersize=8, color='g')
-                ax2.plot(exit_date, exit_equity, 'o', markersize=8, color='purple')
-            elif trade['type'] == 'short':
-                ax2.plot(entry_date, entry_equity, 'v', markersize=8, color='r')
-                ax2.plot(exit_date, exit_equity, 'o', markersize=8, color='orange')
+        # Draw lines connecting entry and exit points
+        ax1.plot([entry_date, exit_date], [entry_price, exit_price], color='gray', linestyle='--', alpha=0.5)
 
-        ax2.set_title('Equity Curve')
-        ax2.set_xlabel('Date')
-        ax2.set_ylabel('Capital')
-        ax2.legend()
+    # Highlight price-based candles
+    for i in range(1, len(self.price_based_data)):
+        prev_close = self.price_based_data['Close'].iloc[i-1]
+        current_close = self.price_based_data['Close'].iloc[i]
+        color = 'g' if current_close > prev_close else 'r'
+        ax1.plot([self.price_based_data.index[i-1], self.price_based_data.index[i]], 
+                [prev_close, current_close], color=color, linewidth=2, alpha=0.7)
 
-        plt.tight_layout()
-        return fig
+    ax1.set_title(f'{self.ticker} - Price-Based Candles, EMA, and Trades')
+    ax1.set_ylabel('Price')
+    ax1.legend()
+
+    # Plot equity curve
+    # Ensure equity_curve has the same length as price_based_data
+    equity_curve = self.equity_curve
+    if len(equity_curve) < len(self.price_based_data):
+        equity_curve = equity_curve + [equity_curve[-1]] * (len(self.price_based_data) - len(equity_curve))
+    elif len(equity_curve) > len(self.price_based_data):
+        equity_curve = equity_curve[:len(self.price_based_data)]
+    
+    ax2.plot(self.price_based_data.index, equity_curve, label='Equity Curve', color='green')
+    ax2.axhline(self.initial_capital, linestyle='--', color='red', alpha=0.6, label='Initial Capital')
+    
+    # Add markers for trade entries and exits on equity curve
+    for trade in self.trades:
+        entry_date = self.price_based_data.index[trade['entry_index']]
+        exit_date = self.price_based_data.index[trade['exit_index']]
+        entry_equity = equity_curve[trade['entry_index']]
+        exit_equity = equity_curve[trade['exit_index']]
+        
+        if trade['type'] == 'long':
+            ax2.plot(entry_date, entry_equity, '^', markersize=8, color='g')
+            ax2.plot(exit_date, exit_equity, 'o', markersize=8, color='purple')
+        elif trade['type'] == 'short':
+            ax2.plot(entry_date, entry_equity, 'v', markersize=8, color='r')
+            ax2.plot(exit_date, exit_equity, 'o', markersize=8, color='orange')
+
+    ax2.set_title('Equity Curve')
+    ax2.set_xlabel('Date')
+    ax2.set_ylabel('Capital')
+    ax2.legend()
+
+    plt.tight_layout()
+    return fig
 
     def generate_backtest_history(self):
         history = []
