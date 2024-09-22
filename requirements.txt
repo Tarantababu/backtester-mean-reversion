@@ -7,3 +7,5 @@ scipy==1.11.3
 yfinance==0.2.31
 tqdm==4.66.1
 deap==1.4.1
+setuptools==68.2.2
+wheel==0.41.2
