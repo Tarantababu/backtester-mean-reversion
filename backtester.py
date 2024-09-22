@@ -253,15 +253,17 @@ class PriceBasedCandleStrategy:
         ax1.legend()
 
         # Plot equity curve
-        ax2.plot(self.price_based_data.index, self.equity_curve, label='Equity Curve', color='green')
+        # Ensure equity_curve has the same length as price_based_data
+        equity_curve = self.equity_curve + [self.equity_curve[-1]] * (len(self.price_based_data) - len(self.equity_curve))
+        ax2.plot(self.price_based_data.index, equity_curve, label='Equity Curve', color='green')
         ax2.axhline(self.initial_capital, linestyle='--', color='red', alpha=0.6, label='Initial Capital')
         
         # Add markers for trade entries and exits on equity curve
         for trade in self.trades:
             entry_date = self.price_based_data.index[trade['entry_index']]
             exit_date = self.price_based_data.index[trade['exit_index']]
-            entry_equity = self.equity_curve[trade['entry_index']]
-            exit_equity = self.equity_curve[trade['exit_index']]
+            entry_equity = equity_curve[trade['entry_index']]
+            exit_equity = equity_curve[trade['exit_index']]
             
             if trade['type'] == 'long':
                 ax2.plot(entry_date, entry_equity, '^', markersize=8, color='g')
