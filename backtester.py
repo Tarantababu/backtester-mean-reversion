@@ -20,7 +20,6 @@ from deap import base, creator, tools, algorithms
 from datetime import datetime, timedelta
 import io
 import traceback
-from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 class PriceBasedCandleStrategy:
     def __init__(self, data, initial_capital=1000, ema_period=20, threshold=0.02, 
@@ -395,13 +394,40 @@ def optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, pop
         progress_bar = st.progress(0)
         progress_text = st.empty()
 
-        def show_progress(gen, progress_bar=progress_bar, progress_text=progress_text):
+        # Custom evolution algorithm with progress bar
+        for gen in range(generations):
+            # Select the next generation individuals
+            offspring = toolbox.select(pop, len(pop))
+            # Clone the selected individuals
+            offspring = list(map(toolbox.clone, offspring))
+            
+            # Apply crossover and mutation on the offspring
+            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+                if random.random() < 0.7:
+                    toolbox.mate(child1, child2)
+                    del child1.fitness.values
+                    del child2.fitness.values
+
+            for mutant in offspring:
+                if random.random() < 0.2:
+                    toolbox.mutate(mutant)
+                    del mutant.fitness.values
+
+            # Evaluate the individuals with an invalid fitness
+            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+            fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
+            for ind, fit in zip(invalid_ind, fitnesses):
+                ind.fitness.values = fit
+
+            # Replace the old population by the offspring
+            pop[:] = offspring
+
+            # Update the hall of fame with the generated individuals
+            hof.update(pop)
+
+            # Update progress
             progress_bar.progress((gen + 1) / generations)
             progress_text.text(f"Generation {gen + 1}/{generations}")
-
-        pop, log = algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.2, ngen=generations, 
-                                       stats=stats, halloffame=hof, verbose=False,
-                                       callback=show_progress)
 
         progress_bar.empty()
         progress_text.empty()
