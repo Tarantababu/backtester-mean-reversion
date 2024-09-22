@@ -5,26 +5,21 @@ import pandas_ta as ta
 import matplotlib.pyplot as plt
 from scipy import stats
 import yfinance as yf
-import logging
 from tqdm import tqdm
 import random
 from deap import base, creator, tools, algorithms
 from datetime import datetime, timedelta
 import io
 
-# Set up logging
-logging.basicConfig(filename='strategy_results.log', level=logging.INFO, 
-                    format='%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-
 class PriceBasedCandleStrategy:
     def __init__(self, data, initial_capital=1000, ema_period=20, threshold=0.02, 
-                 stop_loss_percent=2, price_threshold=0.005, transaction_cost=0.001):
+                 stop_loss_percent=2, price_threshold=0.005):
         self.initial_capital = initial_capital
         self.ema_period = ema_period
         self.threshold = threshold
         self.stop_loss_percent = stop_loss_percent
         self.price_threshold = price_threshold
-        self.transaction_cost = transaction_cost
+        self.transaction_cost = 0.001  # Fixed transaction cost
         self.original_data = data
         self.original_data['EMA'] = ta.ema(self.original_data['Close'], length=ema_period)
         self.price_based_data = self.convert_to_price_based_candles(data)
@@ -118,14 +113,18 @@ class PriceBasedCandleStrategy:
         exit_cost = position['shares'] * exit_price * self.transaction_cost
 
         if position['type'] == 'long':
-            return_amount = (exit_price - position['entry_price']) * position['shares']
-        else:
-            return_amount = (position['entry_price'] - exit_price) * position['shares']
+            profit_loss = (exit_price - position['entry_price']) * position['shares']
+        else:  # short position
+            profit_loss = (position['entry_price'] - exit_price) * position['shares']
 
-        self.cash += return_amount + (position['shares'] * (position['entry_price'] if position['type'] == 'short' else exit_price)) - exit_cost
+        # Subtract both entry and exit transaction costs
+        profit_loss -= (position['entry_cost'] + exit_cost)
+
+        self.cash += (position['shares'] * exit_price) + profit_loss
+        position['profit_loss'] = profit_loss
         self.trades.append(position)
         self.positions.remove(position)
-        self.update_equity(index)  # Update equity immediately after closing a trade
+        self.update_equity(index)
 
     def update_equity(self, index):
         current_price = self.price_based_data['Close'].iloc[index]
@@ -158,7 +157,8 @@ class PriceBasedCandleStrategy:
                 'R-squared of Equity Curve': 0,
                 'Number of Trades': 0,
                 'Win Rate (%)': 0,
-                'Sharpe Ratio': 0
+                'Sharpe Ratio': 0,
+                'Total Profit/Loss': 0
             }
 
         returns = equity_curve.pct_change().dropna()
@@ -173,10 +173,14 @@ class PriceBasedCandleStrategy:
 
         buy_hold_return = (self.original_data['Close'].iloc[-1] - self.original_data['Close'].iloc[0]) / self.original_data['Close'].iloc[0] * 100
 
-        # Calculate win rate
-        winning_trades = sum(1 for trade in self.trades if 
-                             (trade['type'] == 'long' and trade['exit_price'] > trade['entry_price']) or
-                             (trade['type'] == 'short' and trade['exit_price'] < trade['entry_price']))
+        # Calculate win rate and total profit/loss
+        winning_trades = 0
+        total_profit_loss = 0
+        for trade in self.trades:
+            if trade['profit_loss'] > 0:
+                winning_trades += 1
+            total_profit_loss += trade['profit_loss']
+
         win_rate = (winning_trades / len(self.trades)) * 100 if len(self.trades) > 0 else 0
 
         # Calculate Sharpe ratio
@@ -193,8 +197,71 @@ class PriceBasedCandleStrategy:
             'R-squared of Equity Curve': r_squared,
             'Number of Trades': len(self.trades),
             'Win Rate (%)': win_rate,
-            'Sharpe Ratio': sharpe_ratio
+            'Sharpe Ratio': sharpe_ratio,
+            'Total Profit/Loss': total_profit_loss
         }
+
+    def plot_trades_and_equity(self):
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 12), sharex=True)
+        
+        # Plot price-based candles and EMA
+        ax1.plot(self.price_based_data.index, self.price_based_data['Close'], label='Close Price', color='black', alpha=0.7)
+        ax1.plot(self.price_based_data.index, self.price_based_data['EMA'], label=f'EMA({self.ema_period})', linestyle='--', color='blue')
+
+        # Plot trades
+        for trade in self.trades:
+            entry_date = self.price_based_data.index[trade['entry_index']]
+            entry_price = trade['entry_price']
+            exit_date = self.price_based_data.index[trade['exit_index']]
+            exit_price = trade['exit_price']
+            
+            if trade['type'] == 'long':
+                ax1.plot(entry_date, entry_price, '^', markersize=10, color='g', label='Buy' if 'Buy' not in ax1.get_legend_handles_labels()[1] else "")
+                ax1.plot(exit_date, exit_price, 'o', markersize=10, color='purple', label='Close Long' if 'Close Long' not in ax1.get_legend_handles_labels()[1] else "")
+            elif trade['type'] == 'short':
+                ax1.plot(entry_date, entry_price, 'v', markersize=10, color='r', label='Sell' if 'Sell' not in ax1.get_legend_handles_labels()[1] else "")
+                ax1.plot(exit_date, exit_price, 'o', markersize=10, color='orange', label='Close Short' if 'Close Short' not in ax1.get_legend_handles_labels()[1] else "")
+            
+            # Draw lines connecting entry and exit points
+            ax1.plot([entry_date, exit_date], [entry_price, exit_price], color='gray', linestyle='--', alpha=0.5)
+
+        # Highlight price-based candles
+        for i in range(1, len(self.price_based_data)):
+            prev_close = self.price_based_data['Close'].iloc[i-1]
+            current_close = self.price_based_data['Close'].iloc[i]
+            color = 'g' if current_close > prev_close else 'r'
+            ax1.plot([self.price_based_data.index[i-1], self.price_based_data.index[i]], 
+                    [prev_close, current_close], color=color, linewidth=2, alpha=0.7)
+
+        ax1.set_title(f'{self.ticker} - Price-Based Candles, EMA, and Trades')
+        ax1.set_ylabel('Price')
+        ax1.legend()
+
+        # Plot equity curve
+        ax2.plot(self.price_based_data.index, self.equity_curve, label='Equity Curve', color='green')
+        ax2.axhline(self.initial_capital, linestyle='--', color='red', alpha=0.6, label='Initial Capital')
+        
+        # Add markers for trade entries and exits on equity curve
+        for trade in self.trades:
+            entry_date = self.price_based_data.index[trade['entry_index']]
+            exit_date = self.price_based_data.index[trade['exit_index']]
+            entry_equity = self.equity_curve[trade['entry_index']]
+            exit_equity = self.equity_curve[trade['exit_index']]
+            
+            if trade['type'] == 'long':
+                ax2.plot(entry_date, entry_equity, '^', markersize=8, color='g')
+                ax2.plot(exit_date, exit_equity, 'o', markersize=8, color='purple')
+            elif trade['type'] == 'short':
+                ax2.plot(entry_date, entry_equity, 'v', markersize=8, color='r')
+                ax2.plot(exit_date, exit_equity, 'o', markersize=8, color='orange')
+
+        ax2.set_title('Equity Curve')
+        ax2.set_xlabel('Date')
+        ax2.set_ylabel('Capital')
+        ax2.legend()
+
+        plt.tight_layout()
+        return fig
 
     def generate_backtest_history(self):
         history = []
@@ -221,11 +288,11 @@ def run_backtest_for_ticker(ticker, start_date, end_date, initial_capital, param
     data = yf.download(ticker, start=start_date, end=end_date)
 
     if data.empty:
-        print(f"Error: No data available for {ticker} between {start_date} and {end_date}.")
+        st.write(f"Error: No data available for {ticker} between {start_date} and {end_date}.")
         return None
 
     if 'Close' not in data.columns:
-        print(f"Error: 'Close' price data not available for {ticker}.")
+        st.write(f"Error: 'Close' price data not available for {ticker}.")
         return None
 
     strategy = PriceBasedCandleStrategy(data, initial_capital=initial_capital, **params)
@@ -252,7 +319,6 @@ def evaluate_individual(individual, ticker, start_date, end_date, initial_capita
         'threshold': max(0.01, individual[1]),
         'stop_loss_percent': max(0.1, individual[2]),
         'price_threshold': max(0.001, individual[3]),
-        'transaction_cost': max(0.0001, individual[4])
     }
     
     result = run_backtest_for_ticker(ticker, start_date, end_date, initial_capital, params)
@@ -270,37 +336,31 @@ def evaluate_individual(individual, ticker, start_date, end_date, initial_capita
 
 def optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, population_size=50, generations=50):
     try:
-        # Check if FitnessMin and Individual classes already exist
         if 'FitnessMin' not in globals() or 'Individual' not in globals():
             creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
             creator.create("Individual", list, fitness=creator.FitnessMin)
 
         toolbox = base.Toolbox()
 
-        # Define genes with positive ranges
-        toolbox.register("ema_period", random.randint, 5, 100)
-        toolbox.register("threshold", random.uniform, 0.01, 1)
-        toolbox.register("stop_loss_percent", random.uniform, 0.5, 5)
-        toolbox.register("price_threshold", random.uniform, 0.001, 1)
-        toolbox.register("transaction_cost", random.uniform, 0.0001, 0.01)
+        # Define genes with user-specified ranges
+        toolbox.register("ema_period", random.randint, ema_period_min, ema_period_max)
+        toolbox.register("threshold", random.uniform, threshold_min, threshold_max)
+        toolbox.register("stop_loss_percent", random.uniform, stop_loss_min, stop_loss_max)
+        toolbox.register("price_threshold", random.uniform, price_threshold_min, price_threshold_max)
 
-        # Define individual and population
         toolbox.register("individual", tools.initCycle, creator.Individual,
                          (toolbox.ema_period, toolbox.threshold, toolbox.stop_loss_percent, 
-                          toolbox.price_threshold, toolbox.transaction_cost), n=1)
+                          toolbox.price_threshold), n=1)
         toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
-        # Genetic operators
         toolbox.register("evaluate", evaluate_individual, ticker=ticker, start_date=start_date, 
                          end_date=end_date, initial_capital=initial_capital)
         toolbox.register("mate", tools.cxBlend, alpha=0.5)
-        toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=[2, 0.02, 0.2, 0.005, 0.0002], indpb=0.2)
+        toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=[2, 0.02, 0.2, 0.005], indpb=0.25)
         toolbox.register("select", tools.selTournament, tournsize=3)
 
-        # Create initial population
         pop = toolbox.population(n=population_size)
 
-        # Run genetic algorithm
         hof = tools.HallOfFame(1)
         stats = tools.Statistics(lambda ind: ind.fitness.values)
         stats.register("avg", np.mean)
@@ -310,7 +370,6 @@ def optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, pop
         pop, log = algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.2, ngen=generations, 
                                        stats=stats, halloffame=hof, verbose=True)
 
-        # Get best individual
         if len(hof) > 0:
             best_individual = hof[0]
             best_params = {
@@ -318,7 +377,6 @@ def optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, pop
                 'threshold': max(0.01, best_individual[1]),
                 'stop_loss_percent': max(0.1, best_individual[2]),
                 'price_threshold': max(0.001, best_individual[3]),
-                'transaction_cost': max(0.0001, best_individual[4])
             }
 
             best_result = run_backtest_for_ticker(ticker, start_date, end_date, initial_capital, best_params)
@@ -327,112 +385,99 @@ def optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, pop
                 return best_result
 
     except Exception as e:
-        print(f"An error occurred while optimizing {ticker}: {str(e)}")
+        st.write(f"An error occurred while optimizing {ticker}: {str(e)}")
     
     return None
 
 # Streamlit app
-st.title('Price-Based Candle Strategy Optimizer')
+st.title('Trading Bot Optimizer')
 
-# Sidebar inputs
+# Sidebar for input parameters
 st.sidebar.header('Input Parameters')
 
-# Ticker input
-ticker = st.sidebar.text_input('Ticker Symbol', 'AAPL')
-
-# Date range
+tickers = st.sidebar.text_input('Tickers (comma-separated)', 'AAPL,INTC,SPY').split(',')
 end_date = st.sidebar.date_input('End Date', datetime.now())
 start_date = st.sidebar.date_input('Start Date', end_date - timedelta(days=10*365))
+initial_capital = st.sidebar.number_input('Initial Capital', min_value=100, value=1000)
+population_size = st.sidebar.number_input('Population Size', min_value=10, value=50)
+generations = st.sidebar.number_input('Generations', min_value=10, value=50)
 
-# Convert dates to string format
-start_date = start_date.strftime('%Y-%m-%d')
-end_date = end_date.strftime('%Y-%m-%d')
+# Gene definition
+st.sidebar.header('Gene Definition')
+ema_period_min = st.sidebar.number_input('EMA Period Min', min_value=3, value=5)
+ema_period_max = st.sidebar.number_input('EMA Period Max', min_value=ema_period_min+1, value=100)
+threshold_min = st.sidebar.number_input('Threshold Min', min_value=0.001, value=0.01, format='%f')
+threshold_max = st.sidebar.number_input('Threshold Max', min_value=threshold_min+0.001, value=1.0, format='%f')
+stop_loss_min = st.sidebar.number_input('Stop Loss % Min', min_value=0.1, value=0.5, format='%f')
+stop_loss_max = st.sidebar.number_input('Stop Loss % Max', min_value=stop_loss_min+0.1, value=5.0, format='%f')
+price_threshold_min = st.sidebar.number_input('Price Threshold Min', min_value=0.0001, value=0.001, format='%f')
+price_threshold_max = st.sidebar.number_input('Price Threshold Max', min_value=price_threshold_min+0.0001, value=1.0, format='%f')
 
-# Other parameters
-initial_capital = st.sidebar.number_input('Initial Capital', value=1000, min_value=100, step=100)
-population_size = st.sidebar.number_input('Population Size', value=100, min_value=10, step=10)
-generations = st.sidebar.number_input('Generations', value=100, min_value=10, step=10)
-
-# Gene range inputs
-st.sidebar.header('Gene Ranges')
-ema_period_min = st.sidebar.number_input('EMA Period Min', value=5, min_value=3, step=1)
-ema_period_max = st.sidebar.number_input('EMA Period Max', value=100, min_value=ema_period_min+1, step=1)
-threshold_min = st.sidebar.number_input('Threshold Min', value=0.01, min_value=0.001, step=0.001, format="%.3f")
-threshold_max = st.sidebar.number_input('Threshold Max', value=1.0, min_value=threshold_min+0.001, step=0.001, format="%.3f")
-stop_loss_percent_min = st.sidebar.number_input('Stop Loss % Min', value=0.5, min_value=0.1, step=0.1, format="%.1f")
-stop_loss_percent_max = st.sidebar.number_input('Stop Loss % Max', value=5.0, min_value=stop_loss_percent_min+0.1, step=0.1, format="%.1f")
-price_threshold_min = st.sidebar.number_input('Price Threshold Min', value=0.001, min_value=0.0001, step=0.0001, format="%.4f")
-price_threshold_max = st.sidebar.number_input('Price Threshold Max', value=1.0, min_value=price_threshold_min+0.0001, step=0.0001, format="%.4f")
-transaction_cost_min = st.sidebar.number_input('Transaction Cost Min', value=0.0001, min_value=0.0001, step=0.0001, format="%.4f")
-transaction_cost_max = st.sidebar.number_input('Transaction Cost Max', value=0.01, min_value=transaction_cost_min+0.0001, step=0.0001, format="%.4f")
-
-# Run optimization button
+# Run optimization
 if st.sidebar.button('Run Optimization'):
-    st.write(f"Optimizing strategy for {ticker}...")
-    
-    # Update toolbox with user-defined ranges
-    creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
-    creator.create("Individual", list, fitness=creator.FitnessMin)
-    toolbox = base.Toolbox()
-    toolbox.register("ema_period", random.randint, ema_period_min, ema_period_max)
-    toolbox.register("threshold", random.uniform, threshold_min, threshold_max)
-    toolbox.register("stop_loss_percent", random.uniform, stop_loss_percent_min, stop_loss_percent_max)
-    toolbox.register("price_threshold", random.uniform, price_threshold_min, price_threshold_max)
-    toolbox.register("transaction_cost", random.uniform, transaction_cost_min, transaction_cost_max)
-    
-    best_result = optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, population_size, generations)
-    
-    if best_result:
-        st.write("Optimization completed successfully!")
+    optimized_results = []
+
+    for ticker in tickers:
+        st.write(f"\nOptimizing strategy for {ticker}...")
         
-        # Display performance metrics
-        st.header("Performance Metrics")
-        metrics = best_result['performance_metrics']
-        for metric, value in metrics.items():
-            st.write(f"{metric}: {value:.4f}" if isinstance(value, (int, float)) else f"{metric}: {value}")
-        st.write(f"Opti Score: {best_result['opti_score']:.6f}")
+        # Check data availability
+        data = yf.download(ticker, start=start_date, end=end_date)
+        if data.empty:
+            st.write(f"No data available for {ticker} between {start_date} and {end_date}. Skipping...")
+            continue
         
-        # Display optimized parameters
-        st.header("Optimized Parameters")
-        for param, value in best_result['params'].items():
-            st.write(f"{param}: {value:.4f}" if isinstance(value, float) else f"{param}: {value}")
-        
-        # Plot equity curve
-        st.header("Equity Curve")
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(best_result['strategy'].price_based_data.index, best_result['strategy'].equity_curve)
-        ax.set_title(f'Equity Curve for {ticker}')
+        best_result = optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, population_size, generations)
+        if best_result:
+            optimized_results.append(best_result)
+            
+            st.write("Best parameters:")
+            st.write(best_result['params'])
+            st.write("Performance Metrics:")
+            for metric, value in best_result['performance_metrics'].items():
+                if isinstance(value, (int, float)):
+                    st.write(f"  {metric}: {value:.4f}")
+                else:
+                    st.write(f"  {metric}: {value}")
+            st.write(f"  Opti Score: {best_result['opti_score']:.6f}")
+
+            # Display backtest history
+            st.write(f"\nBacktest History for {ticker}:")
+            st.dataframe(best_result['backtest_history'])
+
+            # Plot the results for each optimized strategy
+            fig = best_result['strategy'].plot_trades_and_equity()
+            st.pyplot(fig)
+        else:
+            st.write(f"No valid strategy found for {ticker}")
+
+    if optimized_results:
+        st.write("\nBacktest Summary:")
+        summary_df = pd.DataFrame([
+            {
+                'Ticker': result['ticker'],
+                'Total Return (%)': result['performance_metrics']['Total Return (%)'],
+                'Buy & Hold (%)': result['performance_metrics']['Buy and Hold Return (%)'],
+                'Max Drawdown (%)': result['performance_metrics']['Max Drawdown (%)'],
+                'Trades': result['performance_metrics']['Number of Trades'],
+                'Win Rate (%)': result['performance_metrics']['Win Rate (%)'],
+                'Sharpe Ratio': result['performance_metrics']['Sharpe Ratio'],
+                'Opti Score': result['opti_score'],
+                'Optimized Parameters': f"EMA: {result['params']['ema_period']}, Threshold: {result['params']['threshold']:.4f}, Stop Loss: {result['params']['stop_loss_percent']:.2f}%, Price Threshold: {result['params']['price_threshold']:.4f}"
+            }
+            for result in optimized_results
+        ])
+        st.dataframe(summary_df)
+
+        # Plot combined equity curves
+        fig, ax = plt.subplots(figsize=(16, 8))
+        for result in optimized_results:
+            ax.plot(result['strategy'].price_based_data.index, result['strategy'].equity_curve, label=result['ticker'])
+
+        ax.set_title('Optimized Equity Curves for All Tickers')
         ax.set_xlabel('Date')
         ax.set_ylabel('Capital')
+        ax.legend()
+        plt.tight_layout()
         st.pyplot(fig)
-        
-        # Display backtest history
-        st.header("Backtest History")
-        st.dataframe(best_result['backtest_history'])
-        
-        # Option to download backtest history as CSV
-        csv = best_result['backtest_history'].to_csv(index=False)
-        st.download_button(
-            label="Download Backtest History as CSV",
-            data=csv,
-            file_name=f"{ticker}_backtest_history.csv",
-            mime="text/csv"
-        )
     else:
-        st.write(f"No valid strategy found for {ticker}")
-
-# Instructions
-st.sidebar.markdown("""
-## Instructions
-1. Enter the ticker symbol for the stock you want to optimize.
-2. Set the date range for backtesting.
-3. Adjust the initial capital, population size, and number of generations.
-4. Fine-tune the gene ranges for optimization.
-5. Click 'Run Optimization' to start the process.
-6. Review the results, including performance metrics, optimized parameters, equity curve, and backtest history.
-7. Download the backtest history as a CSV file if desired.
-""")
-
-# Footer
-st.sidebar.markdown("---")
-st.sidebar.markdown("Created with Streamlit")
+        st.write("No valid strategies found for any tickers.")
