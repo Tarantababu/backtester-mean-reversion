@@ -23,13 +23,14 @@ import traceback
 
 class PriceBasedCandleStrategy:
     def __init__(self, data, initial_capital=1000, ema_period=20, threshold=0.02, 
-                 stop_loss_percent=2, price_threshold=0.005):
+                 stop_loss_percent=2, price_threshold=0.005, position_size=0.2, transaction_cost=0.001):
         self.initial_capital = initial_capital
         self.ema_period = ema_period
         self.threshold = threshold
         self.stop_loss_percent = stop_loss_percent
         self.price_threshold = price_threshold
-        self.transaction_cost = 0.001  # Fixed transaction cost
+        self.position_size = position_size
+        self.transaction_cost = transaction_cost
         self.original_data = data
         self.original_data['EMA'] = ta.ema(self.original_data['Close'], length=ema_period)
         self.price_based_data = self.convert_to_price_based_candles(data)
@@ -68,7 +69,7 @@ class PriceBasedCandleStrategy:
         return (price - ema) / ema
 
     def backtest(self, progress_bar=None):
-        self.equity_curve = [self.initial_capital] * len(self.price_based_data)
+        self.equity_curve = [self.initial_capital]
         total_steps = len(self.price_based_data)
         for i in range(1, total_steps):
             if i >= self.ema_period:
@@ -90,25 +91,23 @@ class PriceBasedCandleStrategy:
                 progress_bar.progress((i + 1) / total_steps)
 
     def enter_trade(self, position_type, price, ema, index):
-        position_size = self.cash * 0.2  # Use 20% of available cash for each trade
-        entry_cost = position_size * self.transaction_cost
-        adjusted_position_size = position_size - entry_cost
-        shares = adjusted_position_size / price
-        stop_loss = price * (1 - self.stop_loss_percent / 100) if position_type == 'long' else price * (1 + self.stop_loss_percent / 100)
+        trade_value = self.cash * self.position_size
+        shares = trade_value / price
+        transaction_fee = trade_value * self.transaction_cost
 
         position = {
             'type': position_type,
             'entry_price': price,
-            'stop_loss': stop_loss,
+            'stop_loss': price * (1 - self.stop_loss_percent / 100) if position_type == 'long' else price * (1 + self.stop_loss_percent / 100),
             'entry_index': index,
             'exit_index': None,
             'exit_price': None,
             'shares': shares,
-            'entry_cost': entry_cost
+            'entry_cost': transaction_fee
         }
         self.positions.append(position)
-        self.cash -= position_size
-        self.update_equity(index)  # Update equity immediately after entering a trade
+        self.cash -= (trade_value + transaction_fee)
+        self.update_equity(index)
 
     def check_exit_condition(self, index):
         price = self.price_based_data['Close'].iloc[index]
@@ -124,17 +123,19 @@ class PriceBasedCandleStrategy:
     def exit_trade(self, position, index, exit_price):
         position['exit_index'] = index
         position['exit_price'] = exit_price
-        exit_cost = position['shares'] * exit_price * self.transaction_cost
+        
+        trade_value = position['shares'] * exit_price
+        exit_cost = trade_value * self.transaction_cost
 
         if position['type'] == 'long':
-            profit_loss = (exit_price - position['entry_price']) * position['shares']
+            profit_loss = trade_value - (position['shares'] * position['entry_price'])
         else:  # short position
-            profit_loss = (position['entry_price'] - exit_price) * position['shares']
+            profit_loss = (position['shares'] * position['entry_price']) - trade_value
 
         # Subtract both entry and exit transaction costs
         profit_loss -= (position['entry_cost'] + exit_cost)
 
-        self.cash += (position['shares'] * exit_price) + profit_loss
+        self.cash += trade_value - exit_cost
         position['profit_loss'] = profit_loss
         self.trades.append(position)
         self.positions.remove(position)
@@ -148,7 +149,7 @@ class PriceBasedCandleStrategy:
             for position in self.positions
         )
         total_equity = self.cash + positions_value
-        self.equity_curve[index] = total_equity
+        self.equity_curve.append(total_equity)
 
     def map_trades_to_original_data(self):
         for trade in self.trades:
@@ -336,12 +337,14 @@ def run_backtest_for_ticker(ticker, start_date, end_date, initial_capital, param
         st.error(traceback.format_exc())
         return None
 
-def evaluate_individual(individual, ticker, start_date, end_date, initial_capital):
+def evaluate_individual(individual, ticker, start_date, end_date, initial_capital, position_size, transaction_cost):
     params = {
         'ema_period': max(3, int(individual[0])),  # Ensure EMA period is at least 3
         'threshold': max(0.01, individual[1]),
         'stop_loss_percent': max(0.1, individual[2]),
         'price_threshold': max(0.001, individual[3]),
+        'position_size': position_size,
+        'transaction_cost': transaction_cost
     }
     
     result = run_backtest_for_ticker(ticker, start_date, end_date, initial_capital, params)
@@ -357,7 +360,7 @@ def evaluate_individual(individual, ticker, start_date, end_date, initial_capita
     
     return float('inf'),
 
-def optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, population_size=50, generations=50):
+def optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, position_size, transaction_cost, population_size=50, generations=50):
     try:
         if 'FitnessMin' not in globals() or 'Individual' not in globals():
             creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
@@ -377,7 +380,8 @@ def optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, pop
         toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
         toolbox.register("evaluate", evaluate_individual, ticker=ticker, start_date=start_date, 
-                         end_date=end_date, initial_capital=initial_capital)
+                         end_date=end_date, initial_capital=initial_capital,
+                         position_size=position_size, transaction_cost=transaction_cost)
         toolbox.register("mate", tools.cxBlend, alpha=0.5)
         toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=[2, 0.02, 0.2, 0.005], indpb=0.25)
         toolbox.register("select", tools.selTournament, tournsize=3)
@@ -439,6 +443,8 @@ def optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, pop
                 'threshold': max(0.01, best_individual[1]),
                 'stop_loss_percent': max(0.1, best_individual[2]),
                 'price_threshold': max(0.001, best_individual[3]),
+                'position_size': position_size,
+                'transaction_cost': transaction_cost
             }
 
             best_result = run_backtest_for_ticker(ticker, start_date, end_date, initial_capital, best_params)
@@ -465,6 +471,11 @@ initial_capital = st.sidebar.number_input('Initial Capital', min_value=100, valu
 population_size = st.sidebar.number_input('Population Size', min_value=10, value=50)
 generations = st.sidebar.number_input('Generations', min_value=10, value=50)
 
+# Strategy parameters
+st.sidebar.header('Strategy Parameters')
+position_size = st.sidebar.slider('Position Size (% of capital)', min_value=0.1, max_value=1.0, value=0.2, step=0.1)
+transaction_cost = st.sidebar.number_input('Transaction Cost (%)', min_value=0.0, max_value=0.01, value=0.001, format='%f')
+
 # Gene definition
 st.sidebar.header('Gene Definition')
 ema_period_min = st.sidebar.number_input('EMA Period Min', min_value=3, value=5)
@@ -489,7 +500,7 @@ if st.sidebar.button('Run Optimization'):
             st.warning(f"No data available for {ticker} between {start_date} and {end_date}. Skipping...")
             continue
         
-        best_result = optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, population_size, generations)
+        best_result = optimize_strategy_genetic(ticker, start_date, end_date, initial_capital, position_size, transaction_cost, population_size, generations)
         if best_result:
             optimized_results.append(best_result)
             
